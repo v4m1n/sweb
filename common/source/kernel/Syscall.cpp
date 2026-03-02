@@ -7,7 +7,6 @@
 #include "ProcessRegistry.h"
 #include "File.h"
 #include "Scheduler.h"
-#include "ArchHypervisor.h"
 
 size_t Syscall::syscallException(size_t syscall_number, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5)
 {
@@ -49,9 +48,6 @@ size_t Syscall::syscallException(size_t syscall_number, size_t arg1, size_t arg2
       break;
     case sc_pseudols:
       pseudols((const char*) arg1, (char*) arg2, arg3);
-      break;
-    case sc_hypervisor_init_guest:
-      hypervisor_init_guest(/*TODO*/);
       break;
     default:
       return_value = -1;
@@ -185,8 +181,3 @@ void Syscall::trace()
   currentThread->printBacktrace();
 }
 
-void Syscall::hypervisor_init_guest()
-{
-  debug(SYSCALL, "hypervisor_init_guest called ... TODO\n");
-  ArchHypervisor::instance()->init_guest();
-}
