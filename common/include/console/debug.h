@@ -48,6 +48,7 @@ const size_t USERPROCESS        = Ansi_Cyan    | OUTPUT_ENABLED;
 const size_t PROCESS_REG        = Ansi_Yellow  | OUTPUT_ENABLED;
 const size_t BACKTRACE          = Ansi_Cyan    | OUTPUT_ENABLED;
 const size_t USERTRACE          = Ansi_Red     | OUTPUT_ENABLED;
+const size_t GUEST              = Ansi_Cyan    | OUTPUT_ENABLED;
 
 //group memory management
 const size_t PM                 = Ansi_Green | OUTPUT_ENABLED;
@@ -86,3 +87,7 @@ const size_t M_STORAGE_MANAGER  = Ansi_Yellow;
 const size_t M_INODE            = Ansi_Yellow;
 const size_t M_SB               = Ansi_Yellow;
 const size_t M_ZONE             = Ansi_Yellow;
+
+//group hypervisor TODO
+const size_t HV_INIT            = Ansi_Blue    | OUTPUT_ENABLED;
+const size_t HV_TUTOR           = Ansi_Blue    | OUTPUT_ENABLED;

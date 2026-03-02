@@ -25,6 +25,9 @@
 #include "Terminal.h"
 #include "outerrstream.h"
 #include "user_progs.h"
+#include "ArchHypervisor.h"
+
+void setupGuestPrinting();
 
 extern void* kernel_end_address;
 
@@ -110,6 +113,10 @@ extern "C" void startup()
 
   KeyboardManager::instance();
   ArchInterrupts::enableKBD();
+
+  ArchHypervisor::instance();
+
+  setupGuestPrinting();
 
   debug(MAIN, "Adding Kernel threads\n");
   Scheduler::instance()->addNewThread(main_console);
