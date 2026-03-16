@@ -11,11 +11,34 @@
 #include "SWEBDebugInfo.h"
 #include "PageManager.h"
 #include "KernelMemoryManager.h"
+#include "Console.h"
+
+extern Console* main_console;
 
 extern void* kernel_end_address;
 
 multiboot_info_t* multi_boot_structure_pointer = (multiboot_info_t*)0xDEADDEAD; // must not be in bss segment
 static struct multiboot_remainder mbr __attribute__ ((section (".data"))); // must not be in bss segment
+
+struct CPUID_info
+{
+  uint32 eax;
+  uint32 ebx;
+  uint32 ecx;
+  uint32 edx;
+};
+
+CPUID_info get_cpuid(uint64 leaf, uint64 subleaf=0)
+{
+  CPUID_info ret;
+  asm ("cpuid" : "=a"(ret.eax), "=b"(ret.ebx), "=c"(ret.ecx), "=d"(ret.edx) : "a"(leaf), "c"(subleaf));
+  return ret;
+}
+uint64 set_cr4_bits(uint64 bitmask)
+{
+  asm ("mov %%cr4, %%rax; or %%rax, %0; mov %0, %%cr4":"+r"(bitmask)::"rax", "memory");
+  return bitmask;
+}
 
 extern "C" void parseMultibootHeader()
 {
@@ -110,26 +133,14 @@ size_t ArchCommon::getNumModules(size_t is_paging_set_up)
   }
 }
 
-size_t ArchCommon::getModuleStartAddress(size_t num,size_t is_paging_set_up)
+size_t ArchCommon::getModuleStartAddress(size_t num)
 {
-  if (is_paging_set_up)
-    return mbr.module_maps[num].start_address | PHYSICAL_TO_VIRTUAL_OFFSET;
-  else
-  {
-    struct multiboot_remainder &orig_mbr = (struct multiboot_remainder &)(*((struct multiboot_remainder*)VIRTUAL_TO_PHYSICAL_BOOT((pointer)&mbr)));
-    return orig_mbr.module_maps[num].start_address;
-  }
+  return mbr.module_maps[num].start_address | IDENT_MAPPING_START;
 }
 
-size_t ArchCommon::getModuleEndAddress(size_t num,size_t is_paging_set_up)
+size_t ArchCommon::getModuleEndAddress(size_t num)
 {
-  if (is_paging_set_up)
-    return mbr.module_maps[num].end_address | PHYSICAL_TO_VIRTUAL_OFFSET;
-  else
-  {
-    struct multiboot_remainder &orig_mbr = (struct multiboot_remainder &)(*((struct multiboot_remainder*)VIRTUAL_TO_PHYSICAL_BOOT((pointer)&mbr)));
-    return orig_mbr.module_maps[num].end_address;
-  }
+  return mbr.module_maps[num].end_address | IDENT_MAPPING_START;
 }
 
 size_t ArchCommon::getVESAConsoleHeight()
@@ -225,10 +236,10 @@ extern "C" void entry64()
   PRINT("Initializing Kernel Paging Structures...\n");
   initialisePaging();
   PRINT("Setting CR3 Register...\n");
-  asm("mov %%rax, %%cr3" : : "a"(VIRTUAL_TO_PHYSICAL_BOOT(ArchMemory::getRootOfKernelPagingStructure())));
+  asm("mov %%rax, %%cr3" : : "a"(VIRTUAL_TO_PHYSICAL_BOOT(ArchMemory::getRootOfKernelPagingStructure())) : "memory");
   PRINT("Switch to our own stack...\n");
   asm("mov %[stack], %%rsp\n"
-      "mov %[stack], %%rbp\n" : : [stack]"i"(boot_stack + 0x4000));
+      "mov %[stack], %%rbp\n" : : [stack]"i"(boot_stack + 0x4000) : "memory");
   PRINT("Loading Long Mode Segments...\n");
 
   gdt_ptr.limit = sizeof(gdt) - 1;
@@ -239,8 +250,24 @@ extern "C" void entry64()
       "mov %%ax, %%ss\n"
       "mov %%ax, %%fs\n"
       "mov %%ax, %%gs\n"
-      : : "a"(KERNEL_DS));
+      : : "a"(KERNEL_DS) : "memory");
   asm("ltr %%ax" : : "a"(KERNEL_TSS));
+
+  auto cpuid = get_cpuid(0);
+  PRINT("Check SMEP support...\n");
+  assert((cpuid.eax >= 1) && "CPU does not support any features");
+  cpuid = get_cpuid(7);
+  if (cpuid.ebx & (1<<7))
+  {
+    PRINT("Enable SMEP...\n");
+    set_cr4_bits(1ULL<<20);
+  }
+  cpuid = get_cpuid(1);
+  assert((cpuid.edx & 1U<<25) && "CPU does not support SSE");
+  PRINT("Enabling SSE...\n");
+  set_cr4_bits(1ULL<<10 | 1ULL<<9);
+
+
   PRINT("Calling startup()...\n");
   asm("jmp *%[startup]" : : [startup]"r"(startup));
   while (1);
@@ -269,35 +296,77 @@ void ArchCommon::idle()
 #define STATS_OFFSET 22
 #define FREE_PAGES_OFFSET STATS_OFFSET + 11*2
 
-void ArchCommon::drawStat() {
-    const char* text  = "Free pages      F9 MemInfo   F10 Locks   F11 Stacktrace   F12 Threads";
-    const char* color = "xxxxxxxxxx      xx           xxx         xxx              xxx        ";
 
-    char* fb = (char*)getFBPtr();
-    size_t i = 0;
-    while(text[i]) {
-        fb[i * 2 + STATS_OFFSET] = text[i];
-        fb[i * 2 + STATS_OFFSET + 1] = (char)(color[i] == 'x' ? 0x80 : 0x08);
+void ArchCommon::drawStat()
+{
+  const char* text  = "Free pages      F9 MemInfo   F10 Locks   F11 Stacktrace   F12 Threads";
+  const char* color = "xxxxxxxxxx      xx           xxx         xxx              xxx        ";
+
+  size_t i = 0;
+  char itoa_buffer[33];
+
+  if (haveVESAConsole()) {
+    FrameBufferConsole* fb_console = static_cast<FrameBufferConsole*>(main_console);
+    if (fb_console) {
+      size_t row = 0;
+      size_t column = STATS_OFFSET - 12;
+
+      while (text[i]) {
+        uint8 state = (color[i] == 'x' ? 0x80 : 0x08); // 0x80 -> light bakground/dark text, 0x08 -> dark background/light text 
+        fb_console->consoleSetCharacter(row, column + i, text[i], state);
         i++;
+      }
+
+      memset(itoa_buffer, '\0', sizeof(itoa_buffer));
+      itoa(PageManager::instance()->getNumFreePages(), itoa_buffer, 10);
+
+      for (size_t j = 0; j < sizeof(itoa_buffer) && itoa_buffer[j] != '\0'; ++j) {
+        fb_console->consoleSetCharacter(row, column + 11 + j, itoa_buffer[j], 0x08);   
+      }
+    }
+  } 
+  else 
+  {
+    char* fb = (char*)getFBPtr();
+
+    while (text[i]) {
+      fb[i * 2 + STATS_OFFSET] = text[i];
+      fb[i * 2 + STATS_OFFSET + 1] = (char)(color[i] == 'x' ? 0x80 : 0x08);
+      i++;
     }
 
-    char itoa_buffer[33];
     memset(itoa_buffer, '\0', sizeof(itoa_buffer));
     itoa(PageManager::instance()->getNumFreePages(), itoa_buffer, 10);
 
-    for(size_t i = 0; (i < sizeof(itoa_buffer)) && (itoa_buffer[i] != '\0'); ++i)
+    for (size_t i = 0; (i < sizeof(itoa_buffer)) && (itoa_buffer[i] != '\0'); ++i) 
     {
       fb[i * 2 + FREE_PAGES_OFFSET] = itoa_buffer[i];
     }
+  }
 }
+
 
 void ArchCommon::drawHeartBeat()
 {
   const char* clock = "/-\\|";
   static uint32 heart_beat_value = 0;
-  char* fb = (char*)getFBPtr();
-  fb[0] = clock[heart_beat_value++ % 4];
-  fb[1] = (char)0x9f;
+
+  if (haveVESAConsole())
+  {
+    uint8 state = 0x9f;  
+    char heartbeat_char = clock[heart_beat_value++ % 4];
+
+    FrameBufferConsole* fb_console = static_cast<FrameBufferConsole*>(main_console);
+    if(fb_console)
+      fb_console->consoleSetCharacter(0, 0, heartbeat_char, state);
+  }
+  else 
+  {
+    char* fb = (char*)getFBPtr();
+    fb[0] = clock[heart_beat_value++ % 4];
+    fb[1] = (char)0x9f;
+  }
 
   drawStat();
 }
+

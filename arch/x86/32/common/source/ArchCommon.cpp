@@ -10,6 +10,9 @@
 #include "Stabs2DebugInfo.h"
 #include "ports.h"
 #include "PageManager.h"
+#include "Console.h"
+
+extern Console *main_console;
 
 extern void* kernel_end_address;
 
@@ -109,28 +112,14 @@ uint32 ArchCommon::getNumModules(uint32 is_paging_set_up)
 
 }
 
-uint32 ArchCommon::getModuleStartAddress(uint32 num, uint32 is_paging_set_up)
+uint32 ArchCommon::getModuleStartAddress(uint32 num)
 {
-  if (is_paging_set_up)
-    return mbr.module_maps[num].start_address + 3*1024*1024*1024U;
-  else
-  {
-    struct multiboot_remainder &orig_mbr = (struct multiboot_remainder &)(*((struct multiboot_remainder*)VIRTUAL_TO_PHYSICAL_BOOT((pointer)&mbr)));
-    return orig_mbr.module_maps[num].start_address ;
-  }
-
+  return mbr.module_maps[num].start_address | IDENT_MAPPING_START;
 }
 
-uint32 ArchCommon::getModuleEndAddress(uint32 num, uint32 is_paging_set_up)
+uint32 ArchCommon::getModuleEndAddress(uint32 num)
 {
-  if (is_paging_set_up)
-    return mbr.module_maps[num].end_address + 3*1024*1024*1024U;
-  else
-  {
-    struct multiboot_remainder &orig_mbr = (struct multiboot_remainder &)(*((struct multiboot_remainder*)VIRTUAL_TO_PHYSICAL_BOOT((pointer)&mbr)));
-    return orig_mbr.module_maps[num].end_address;
-  }
-
+  return mbr.module_maps[num].end_address | IDENT_MAPPING_START;
 }
 
 uint32 ArchCommon::getVESAConsoleHeight()
@@ -205,14 +194,14 @@ Stabs2DebugInfo const *kernel_debug_info = 0;
 
 void ArchCommon::initDebug()
 {
-  extern unsigned char stab_start_address_nr;
-  extern unsigned char stab_end_address_nr;
-
-  extern unsigned char stabstr_start_address_nr;
-
-  kernel_debug_info = new Stabs2DebugInfo((char const *)&stab_start_address_nr,
-                                          (char const *)&stab_end_address_nr,
-                                          (char const *)&stabstr_start_address_nr);
+  for (size_t i = 0; i < getNumModules(); ++i)
+  {
+    if (memcmp("SWEBDBG1",(char const *)getModuleStartAddress(i),8) == 0)
+      kernel_debug_info = new SWEBDebugInfo((char const *)getModuleStartAddress(i),
+                                              (char const *)getModuleEndAddress(i));
+  }
+  if (!kernel_debug_info)
+    kernel_debug_info = new SWEBDebugInfo(0, 0);
 }
 
 void ArchCommon::idle()
@@ -223,35 +212,77 @@ void ArchCommon::idle()
 #define STATS_OFFSET 22
 #define FREE_PAGES_OFFSET STATS_OFFSET + 11*2
 
-void ArchCommon::drawStat() {
+
+void ArchCommon::drawStat()
+{
   const char* text  = "Free pages      F9 MemInfo   F10 Locks   F11 Stacktrace   F12 Threads";
   const char* color = "xxxxxxxxxx      xx           xxx         xxx              xxx        ";
 
-  char* fb = (char*)getFBPtr();
   size_t i = 0;
-  while(text[i]) {
-    fb[i * 2 + STATS_OFFSET] = text[i];
-    fb[i * 2 + STATS_OFFSET + 1] = (char)(color[i] == 'x' ? 0x80 : 0x08);
-    i++;
-  }
-
   char itoa_buffer[33];
-  memset(itoa_buffer, '\0', sizeof(itoa_buffer));
-  itoa(PageManager::instance()->getNumFreePages(), itoa_buffer, 10);
 
-  for(size_t i = 0; (i < sizeof(itoa_buffer)) && (itoa_buffer[i] != '\0'); ++i)
+  if (haveVESAConsole()) {
+    FrameBufferConsole* fb_console = static_cast<FrameBufferConsole*>(main_console);
+    if (fb_console) {
+      size_t row = 0;
+      size_t column = STATS_OFFSET - 12;
+
+      while (text[i]) {
+        uint8 state = (color[i] == 'x' ? 0x80 : 0x08); // 0x80 -> light bakground/dark text, 0x08 -> dark background/light text 
+        fb_console->consoleSetCharacter(row, column + i, text[i], state);
+        i++;
+      }
+
+      memset(itoa_buffer, '\0', sizeof(itoa_buffer));
+      itoa(PageManager::instance()->getNumFreePages(), itoa_buffer, 10);
+
+      for (size_t j = 0; j < sizeof(itoa_buffer) && itoa_buffer[j] != '\0'; ++j) {
+        fb_console->consoleSetCharacter(row, column + 11 + j, itoa_buffer[j], 0x08);   
+      }
+    }
+  } 
+  else 
   {
-    fb[i * 2 + FREE_PAGES_OFFSET] = itoa_buffer[i];
+    char* fb = (char*)getFBPtr();
+
+    while (text[i]) {
+      fb[i * 2 + STATS_OFFSET] = text[i];
+      fb[i * 2 + STATS_OFFSET + 1] = (char)(color[i] == 'x' ? 0x80 : 0x08);
+      i++;
+    }
+
+    memset(itoa_buffer, '\0', sizeof(itoa_buffer));
+    itoa(PageManager::instance()->getNumFreePages(), itoa_buffer, 10);
+
+    for (size_t i = 0; (i < sizeof(itoa_buffer)) && (itoa_buffer[i] != '\0'); ++i) 
+    {
+      fb[i * 2 + FREE_PAGES_OFFSET] = itoa_buffer[i];
+    }
   }
 }
+
 
 void ArchCommon::drawHeartBeat()
 {
   const char* clock = "/-\\|";
   static uint32 heart_beat_value = 0;
-  char* fb = (char*)getFBPtr();
-  fb[0] = clock[heart_beat_value++ % 4];
-  fb[1] = 0x9f;
+
+  if (haveVESAConsole())
+  {
+    uint8 state = 0x9f;  
+    char heartbeat_char = clock[heart_beat_value++ % 4];
+
+    FrameBufferConsole* fb_console = static_cast<FrameBufferConsole*>(main_console);
+    if(fb_console)
+      fb_console->consoleSetCharacter(0, 0, heartbeat_char, state);
+  }
+  else 
+  {
+    char* fb = (char*)getFBPtr();
+    fb[0] = clock[heart_beat_value++ % 4];
+    fb[1] = (char)0x9f;
+  }
 
   drawStat();
 }
+
