@@ -237,9 +237,6 @@ extern "C" void entry64()
   initialisePaging();
   PRINT("Setting CR3 Register...\n");
   asm("mov %%rax, %%cr3" : : "a"(VIRTUAL_TO_PHYSICAL_BOOT(ArchMemory::getRootOfKernelPagingStructure())) : "memory");
-  PRINT("Switch to our own stack...\n");
-  asm("mov %[stack], %%rsp\n"
-      "mov %[stack], %%rbp\n" : : [stack]"i"(boot_stack + 0x4000) : "memory");
   PRINT("Loading Long Mode Segments...\n");
 
   gdt_ptr.limit = sizeof(gdt) - 1;
@@ -259,7 +256,7 @@ extern "C" void entry64()
   cpuid = get_cpuid(7);
   if (cpuid.ebx & (1<<7))
   {
-    PRINT("Enable SMEP...\n");
+    PRINT("Enabling SMEP...\n");
     set_cr4_bits(1ULL<<20);
   }
   cpuid = get_cpuid(1);
@@ -268,8 +265,10 @@ extern "C" void entry64()
   set_cr4_bits(1ULL<<10 | 1ULL<<9);
 
 
-  PRINT("Calling startup()...\n");
-  asm("jmp *%[startup]" : : [startup]"r"(startup));
+  PRINT("Switching to our own stack and calling startup()...\n");
+  asm("mov %[stack], %%rsp\n"
+      "mov %[stack], %%rbp\n"
+      "jmp *%[startup]" : : [startup]"r"(startup), [stack]"i"(boot_stack + 0x4000) : "memory");
   while (1);
 }
 
